@@ -14,7 +14,6 @@ const payment_requests_service_1 = require("./payment-requests.service");
 const entities_1 = require("../entities");
 const platform_express_1 = require("@nestjs/platform-express");
 const multer_1 = require("multer");
-const path_1 = require("path");
 let PaymentRequestsModule = class PaymentRequestsModule {
 };
 exports.PaymentRequestsModule = PaymentRequestsModule;
@@ -23,13 +22,8 @@ exports.PaymentRequestsModule = PaymentRequestsModule = __decorate([
         imports: [
             typeorm_1.TypeOrmModule.forFeature([entities_1.PaymentRequest, entities_1.AgentMaster, entities_1.Notification, entities_1.AuditLog, entities_1.SystemConfig]),
             platform_express_1.MulterModule.register({
-                storage: (0, multer_1.diskStorage)({
-                    destination: (0, path_1.join)(process.cwd(), 'uploads'),
-                    filename: (req, file, cb) => {
-                        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-                        cb(null, uniqueSuffix + (0, path_1.extname)(file.originalname));
-                    },
-                }),
+                storage: (0, multer_1.memoryStorage)(),
+                limits: { fileSize: 10 * 1024 * 1024 },
             }),
         ],
         controllers: [payment_requests_controller_1.PaymentRequestsController],

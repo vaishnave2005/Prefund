@@ -1,587 +1,141 @@
-import React, { useEffect, useState, CSSProperties } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
+import { Eye, RefreshCw, Upload, Download, CheckCircle, Clock, DollarSign, FileText, X, AlertCircle } from 'lucide-react';
 import api from '../../lib/api';
 import { useAuth } from '../../contexts/AuthContext';
+import { formatDate } from '../../lib/utils';
 import RequestTimeline from '../../components/shared/RequestTimeline';
 
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-interface PaymentRequest {
-  id: string;
-  requestId: string;
-  beneficiary: string;
-  agent: string;
-  usdEquivalent: number;
-  swiftCode: string;
-  bank: string;
-  status: string;
-  mt103Url?: string;
-  actualReleaseDate?: string;
-  lmsEntry?: boolean;
-  currency?: string;
-  amount?: number;
+function StatusChip({ status }: { status: string }) {
+  const map: Record<string, { bg: string; color: string }> = {
+    'Ready for SG AP Execution': { bg: '#DCFCE7', color: '#166534' },
+    'Payment Initiated':         { bg: '#E0F2FE', color: '#0369A1' },
+    'Paid':                      { bg: '#D1FAE5', color: '#065F46' },
+  };
+  const s = map[status] || { bg: '#F1F5F9', color: '#475569' };
+  return <span style={{ background: s.bg, color: s.color, padding: '3px 10px', borderRadius: 20, fontSize: 11, fontWeight: 600, whiteSpace: 'nowrap' }}>{status}</span>;
 }
 
-// ─── Status Chip ──────────────────────────────────────────────────────────────
+const labelStyle: React.CSSProperties = { display: 'block', fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 5 };
+const inputStyle: React.CSSProperties = { width: '100%', border: '1px solid #D1D5DB', borderRadius: 8, padding: '9px 12px', fontSize: 13, color: '#111827', background: 'white', outline: 'none', boxSizing: 'border-box' as const };
 
-const STATUS_COLORS: Record<string, { bg: string; color: string; label: string }> = {
-  'Ready for SG AP Execution': { bg: '#EFF6FF', color: '#1D4ED8', label: 'Ready for Execution' },
-  'Payment Initiated':          { bg: '#FFF7ED', color: '#C2410C', label: 'Payment Initiated'   },
-  'Paid':                       { bg: '#F0FDF4', color: '#15803D', label: 'Paid'                },
-  'Pending Approval':           { bg: '#FEF3C7', color: '#B45309', label: 'Pending Approval'    },
-  'Approved':                   { bg: '#F0FDF4', color: '#166534', label: 'Approved'             },
-  'Rejected':                   { bg: '#FFF1F2', color: '#BE123C', label: 'Rejected'             },
-};
-
-const StatusChip: React.FC<{ status: string }> = ({ status }) => {
-  const cfg = STATUS_COLORS[status] ?? { bg: '#F3F4F6', color: '#374151', label: status };
-  const chipStyle: CSSProperties = {
-    display: 'inline-flex',
-    alignItems: 'center',
-    padding: '3px 10px',
-    borderRadius: 9999,
-    fontSize: 12,
-    fontWeight: 600,
-    background: cfg.bg,
-    color: cfg.color,
-    whiteSpace: 'nowrap',
-    letterSpacing: 0.3,
-  };
-  return <span style={chipStyle}>{cfg.label}</span>;
-};
-
-// ─── Upload MT103 Modal ───────────────────────────────────────────────────────
-
-interface UploadModalProps {
-  request: PaymentRequest;
-  onClose: () => void;
-  onSuccess: () => void;
-}
-
-const UploadModal: React.FC<UploadModalProps> = ({ request, onClose, onSuccess }) => {
-  const [file, setFile] = useState<File | null>(null);
-  const [releaseDate, setReleaseDate] = useState('');
-  const [lmsEntry, setLmsEntry] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState('');
-
-  const labelStyle: CSSProperties = {
-    display: 'block',
-    fontSize: 13,
-    fontWeight: 600,
-    color: '#374151',
-    marginBottom: 6,
-  };
-
-  const inputStyle: CSSProperties = {
-    width: '100%',
-    padding: '9px 12px',
-    border: '1.5px solid #D1D5DB',
-    borderRadius: 8,
-    fontSize: 14,
-    color: '#111827',
-    background: '#fff',
-    outline: 'none',
-    boxSizing: 'border-box',
-    transition: 'border-color 0.2s',
-  };
-
-  const handleSubmit = async () => {
-    if (!file) { setError('Please select an MT103 PDF file.'); return; }
-    if (!releaseDate) { setError('Please select a release date.'); return; }
-    setError('');
-    setSubmitting(true);
-    try {
-      const formData = new FormData();
-      formData.append('mt103', file);
-      formData.append('releaseDate', releaseDate);
-      formData.append('lmsEntry', String(lmsEntry));
-      await api.post(`/payment-requests/${request.id}/execute-payment`, formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-      });
-      onSuccess();
-      onClose();
-    } catch (err: any) {
-      setError(err?.response?.data?.message ?? 'Upload failed. Please try again.');
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const overlayStyle: CSSProperties = {
-    position: 'fixed', inset: 0,
-    background: 'rgba(17,24,39,0.45)',
-    backdropFilter: 'blur(4px)',
-    display: 'flex', alignItems: 'center', justifyContent: 'center',
-    zIndex: 9999,
-  };
-
-  const modalStyle: CSSProperties = {
-    background: '#fff',
-    borderRadius: 16,
-    padding: '32px 36px',
-    width: '100%',
-    maxWidth: 520,
-    boxShadow: '0 20px 60px rgba(0,0,0,0.18)',
-    position: 'relative',
-  };
-
-  return (
-    <div style={overlayStyle} onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div style={modalStyle}>
-        {/* Header */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 24 }}>
-          <div>
-            <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: '#111827' }}>Upload MT103 & Mark Paid</h2>
-            <p style={{ margin: '4px 0 0', fontSize: 13, color: '#6B7280' }}>Attach the SWIFT MT103 document to complete payment</p>
-          </div>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 20, color: '#9CA3AF', lineHeight: 1 }}>✕</button>
-        </div>
-
-        {/* Request Summary */}
-        <div style={{ background: '#F9FAFB', border: '1px solid #E5E7EB', borderRadius: 10, padding: '14px 16px', marginBottom: 24 }}>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px 16px', fontSize: 13 }}>
-            <div><span style={{ color: '#6B7280' }}>Request ID: </span><span style={{ fontFamily: 'monospace', fontWeight: 700, color: '#1D4ED8' }}>{request.requestId}</span></div>
-            <div><span style={{ color: '#6B7280' }}>Beneficiary: </span><span style={{ fontWeight: 600, color: '#111827' }}>{request.beneficiary}</span></div>
-            <div><span style={{ color: '#6B7280' }}>Agent: </span><span style={{ color: '#374151' }}>{request.agent}</span></div>
-            <div><span style={{ color: '#6B7280' }}>USD Equiv.: </span><span style={{ fontWeight: 600, color: '#059669' }}>${request.usdEquivalent?.toLocaleString()}</span></div>
-            <div><span style={{ color: '#6B7280' }}>SWIFT: </span><span style={{ fontFamily: 'monospace', color: '#374151' }}>{request.swiftCode}</span></div>
-            <div><span style={{ color: '#6B7280' }}>Bank: </span><span style={{ color: '#374151' }}>{request.bank}</span></div>
-          </div>
-        </div>
-
-        {/* File Upload */}
-        <div style={{ marginBottom: 18 }}>
-          <label style={labelStyle}>MT103 SWIFT Document (PDF) <span style={{ color: '#EF4444' }}>*</span></label>
-          <label htmlFor="mt103-file-input" style={{
-            display: 'flex', alignItems: 'center', gap: 10,
-            border: '2px dashed #D1D5DB', borderRadius: 10, padding: '14px 16px',
-            cursor: 'pointer', background: file ? '#F0FDF4' : '#FAFAFA',
-            borderColor: file ? '#34D399' : '#D1D5DB', transition: 'all 0.2s',
-          }}>
-            <span style={{ fontSize: 22 }}>{file ? '✅' : '📎'}</span>
-            <div>
-              <div style={{ fontSize: 13, fontWeight: 600, color: file ? '#065F46' : '#374151' }}>
-                {file ? file.name : 'Click to select MT103 PDF'}
-              </div>
-              <div style={{ fontSize: 11, color: '#9CA3AF', marginTop: 2 }}>
-                {file ? `${(file.size / 1024).toFixed(1)} KB` : 'Accepted: PDF only'}
-              </div>
-            </div>
-          </label>
-          <input
-            id="mt103-file-input"
-            type="file"
-            accept=".pdf,application/pdf"
-            style={{ display: 'none' }}
-            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-          />
-        </div>
-
-        {/* Release Date */}
-        <div style={{ marginBottom: 18 }}>
-          <label style={labelStyle}>Actual Release Date <span style={{ color: '#EF4444' }}>*</span></label>
-          <input
-            type="date"
-            value={releaseDate}
-            onChange={(e) => setReleaseDate(e.target.value)}
-            style={inputStyle}
-          />
-        </div>
-
-        {/* LMS Entry */}
-        <div style={{ marginBottom: 24 }}>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer' }}>
-            <input
-              type="checkbox"
-              checked={lmsEntry}
-              onChange={(e) => setLmsEntry(e.target.checked)}
-              style={{ width: 16, height: 16, accentColor: '#1D4ED8', cursor: 'pointer' }}
-            />
-            <span style={{ fontSize: 13, fontWeight: 600, color: '#374151' }}>LMS Entry Completed</span>
-          </label>
-          <p style={{ margin: '4px 0 0 26px', fontSize: 12, color: '#9CA3AF' }}>Check if this payment has been recorded in the LMS system</p>
-        </div>
-
-        {/* Error */}
-        {error && (
-          <div style={{ background: '#FFF1F2', border: '1px solid #FECDD3', borderRadius: 8, padding: '10px 14px', marginBottom: 16, fontSize: 13, color: '#BE123C' }}>
-            ⚠️ {error}
-          </div>
-        )}
-
-        {/* Actions */}
-        <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
-          <button onClick={onClose} disabled={submitting} style={{
-            padding: '10px 20px', borderRadius: 8, border: '1.5px solid #D1D5DB',
-            background: '#fff', color: '#374151', fontSize: 14, fontWeight: 600, cursor: 'pointer',
-          }}>
-            Cancel
-          </button>
-          <button onClick={handleSubmit} disabled={submitting} style={{
-            padding: '10px 22px', borderRadius: 8, border: 'none',
-            background: submitting ? '#86EFAC' : '#16A34A', color: '#fff',
-            fontSize: 14, fontWeight: 700, cursor: submitting ? 'not-allowed' : 'pointer',
-            display: 'flex', alignItems: 'center', gap: 8, transition: 'background 0.2s',
-          }}>
-            {submitting ? (
-              <><span style={{ display: 'inline-block', width: 14, height: 14, border: '2px solid #fff', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 0.7s linear infinite' }} /> Uploading...</>
-            ) : (
-              <><span>✔</span> Upload & Mark Paid</>
-            )}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-};
-
-// ─── KPI Card ─────────────────────────────────────────────────────────────────
-
-const KpiCard: React.FC<{ label: string; value: number; icon: string; color: string; bgColor: string }> = ({
-  label, value, icon, color, bgColor,
-}) => (
-  <div style={{
-    background: '#fff',
-    border: '1px solid #E5E7EB',
-    borderRadius: 14,
-    padding: '22px 26px',
-    display: 'flex',
-    alignItems: 'center',
-    gap: 18,
-    boxShadow: '0 1px 4px rgba(0,0,0,0.05)',
-    flex: 1,
-    minWidth: 0,
-  }}>
-    <div style={{
-      width: 52, height: 52, borderRadius: 12,
-      background: bgColor, display: 'flex', alignItems: 'center', justifyContent: 'center',
-      fontSize: 22, flexShrink: 0,
-    }}>
-      {icon}
-    </div>
-    <div>
-      <div style={{ fontSize: 28, fontWeight: 800, color: '#111827', lineHeight: 1 }}>{value}</div>
-      <div style={{ fontSize: 13, color: '#6B7280', marginTop: 4, fontWeight: 500 }}>{label}</div>
-    </div>
-    <div style={{ marginLeft: 'auto', width: 4, height: 44, borderRadius: 99, background: color, flexShrink: 0 }} />
-  </div>
-);
-
-// ─── Main Dashboard ───────────────────────────────────────────────────────────
-
-type TabKey = 'ready' | 'completed';
-
-const SGAPDashboard: React.FC = () => {
-  useAuth();
-  const [requests, setRequests] = useState<PaymentRequest[]>([]);
+export default function SGAPDashboard() {
+  const { user } = useAuth();
+  const [tab, setTab] = useState(0);
+  const [requests, setRequests] = useState<any[]>([]);
+  const [completed, setCompleted] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<TabKey>('ready');
-  const [uploadTarget, setUploadTarget] = useState<PaymentRequest | null>(null);
-  const [timelineTarget, setTimelineTarget] = useState<string | null>(null);
-  const [initiating, setInitiating] = useState<Record<string, boolean>>({});
-  const [toast, setToast] = useState<{ msg: string; type: 'success' | 'error' } | null>(null);
+  const [viewId, setViewId] = useState<string | null>(null);
+  const [uploadPr, setUploadPr] = useState<any>(null);
 
-  const fetchRequests = async () => {
+  const load = useCallback(async () => {
+    setLoading(true);
     try {
-      setLoading(true);
-      const res = await api.get('/payment-requests', { params: { role: 'sgap' } });
-      const data: PaymentRequest[] = res.data?.data ?? res.data ?? [];
-      setRequests(data);
-    } catch {
-      showToast('Failed to load payment requests.', 'error');
-    } finally {
-      setLoading(false);
-    }
-  };
+      const [res, compRes] = await Promise.all([
+        api.get('/payment-requests'),
+        api.get('/payment-requests/completed'),
+      ]);
+      setRequests(res.data.items || []);
+      setCompleted(compRes.data.items || []);
+    } catch (e) { console.error(e); }
+    finally { setLoading(false); }
+  }, []);
 
-  useEffect(() => { fetchRequests(); }, []);
+  useEffect(() => { load(); }, [load]);
 
-  const showToast = (msg: string, type: 'success' | 'error') => {
-    setToast({ msg, type });
-    setTimeout(() => setToast(null), 4000);
-  };
+  const ready = requests.filter(r => r.status === 'Ready for SG AP Execution').length;
+  const initiated = requests.filter(r => r.status === 'Payment Initiated').length;
 
-  const handleMarkInitiated = async (req: PaymentRequest) => {
-    setInitiating((prev) => ({ ...prev, [req.id]: true }));
-    try {
-      await api.patch(`/payment-requests/${req.id}/payment-initiated`);
-      showToast(`Payment initiated for ${req.requestId}.`, 'success');
-      fetchRequests();
-    } catch (err: any) {
-      showToast(err?.response?.data?.message ?? 'Failed to mark initiated.', 'error');
-    } finally {
-      setInitiating((prev) => ({ ...prev, [req.id]: false }));
-    }
-  };
+  async function markInitiated(id: string) {
+    try { await api.patch(`/payment-requests/${id}/payment-initiated`); load(); }
+    catch (e: any) { alert(e.response?.data?.message || 'Failed'); }
+  }
 
-  // Derived lists
-  const readyRows = requests.filter((r) => r.status === 'Ready for SG AP Execution');
-  const completedRows = requests.filter((r) => ['Paid', 'Payment Initiated'].includes(r.status));
-
-  const kpiReady     = readyRows.length;
-  const kpiInitiated = requests.filter((r) => r.status === 'Payment Initiated').length;
-  const kpiCompleted = requests.filter((r) => r.status === 'Paid').length;
-
-  const tableRows = activeTab === 'ready' ? readyRows : completedRows;
-
-  // ─── Styles ───────────────────────────────────────────────────────────────
-
-  const pageStyle: CSSProperties = {
-    minHeight: '100vh',
-    background: '#F3F4F6',
-    fontFamily: "'Inter', 'Segoe UI', sans-serif",
-    padding: '28px 32px',
-    boxSizing: 'border-box',
-  };
-
-  const headerCardStyle: CSSProperties = {
-    background: '#fff',
-    border: '1px solid #E5E7EB',
-    borderRadius: 16,
-    padding: '24px 28px',
-    marginBottom: 22,
-    boxShadow: '0 1px 4px rgba(0,0,0,0.05)',
-  };
-
-  const cardStyle: CSSProperties = {
-    background: '#fff',
-    border: '1px solid #E5E7EB',
-    borderRadius: 14,
-    boxShadow: '0 1px 4px rgba(0,0,0,0.05)',
-    overflow: 'hidden',
-  };
-
-  const thStyle: CSSProperties = {
-    padding: '12px 16px',
-    textAlign: 'left' as const,
-    fontSize: 11,
-    fontWeight: 700,
-    color: '#6B7280',
-    textTransform: 'uppercase' as const,
-    letterSpacing: 0.8,
-    background: '#F9FAFB',
-    borderBottom: '1px solid #E5E7EB',
-    whiteSpace: 'nowrap' as const,
-  };
-
-  const tdStyle: CSSProperties = {
-    padding: '13px 16px',
-    fontSize: 13,
-    color: '#374151',
-    borderBottom: '1px solid #F3F4F6',
-    verticalAlign: 'middle',
-  };
-
-  const tabBtnStyle = (active: boolean): CSSProperties => ({
-    padding: '9px 20px',
-    borderRadius: 8,
-    border: 'none',
-    background: active ? '#1E3A5F' : 'transparent',
-    color: active ? '#fff' : '#6B7280',
-    fontSize: 13,
-    fontWeight: 600,
-    cursor: 'pointer',
-    transition: 'all 0.2s',
-    letterSpacing: 0.2,
-  });
-
-  // ─── Render ───────────────────────────────────────────────────────────────
+  const activeList = tab === 0 ? requests : completed;
 
   return (
-    <div style={pageStyle}>
-      {/* Keyframe for spinner */}
-      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
-
-      {/* Header */}
-      <div style={headerCardStyle}>
-        <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
-          <div>
-            <h1 style={{ margin: 0, fontSize: 26, fontWeight: 700, color: '#111827', letterSpacing: -0.5 }}>
-              SG AP — Creditors Portal
-            </h1>
-            <p style={{ margin: '6px 0 0', fontSize: 14, color: '#6B7280', fontWeight: 400 }}>
-              Accounts Payable — Payment Execution &amp; MT103 Upload
-            </p>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#22C55E', display: 'inline-block' }} />
-            <span style={{ fontSize: 12, color: '#6B7280', fontWeight: 500 }}>Live</span>
-            <button onClick={fetchRequests} style={{
-              marginLeft: 8, padding: '8px 16px', borderRadius: 8, border: '1.5px solid #E5E7EB',
-              background: '#F9FAFB', color: '#374151', fontSize: 13, fontWeight: 600, cursor: 'pointer',
-              display: 'flex', alignItems: 'center', gap: 6,
-            }}>
-              ↻ Refresh
-            </button>
-          </div>
-        </div>
+    <div style={{ maxWidth: 1280, margin: '0 auto', padding: '32px 28px', fontFamily: "'Inter', system-ui, sans-serif" }}>
+      <div style={{ marginBottom: 24 }}>
+        <h1 style={{ fontSize: 26, fontWeight: 700, color: '#111827', marginBottom: 4 }}>SG AP — Creditors Portal</h1>
+        <p style={{ fontSize: 13, color: '#6B7280' }}>Accounts Payable — Payment Execution &amp; MT103 Upload (Stored in PostgreSQL)</p>
       </div>
 
-      {/* KPI Cards */}
-      <div style={{ display: 'flex', gap: 16, marginBottom: 22, flexWrap: 'wrap' }}>
-        <KpiCard label="Ready to Execute"    value={kpiReady}     icon="⚡" color="#3B82F6" bgColor="#EFF6FF" />
-        <KpiCard label="Payments Initiated"  value={kpiInitiated} icon="🔄" color="#F97316" bgColor="#FFF7ED" />
-        <KpiCard label="Completed (Paid)"    value={kpiCompleted} icon="✅" color="#22C55E" bgColor="#F0FDF4" />
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 16, marginBottom: 28 }}>
+        {[
+          { title: 'READY TO EXECUTE', value: ready, icon: <Clock size={18} color="#D97706" /> },
+          { title: 'PAYMENT INITIATED', value: initiated, icon: <DollarSign size={18} color="#1D4ED8" /> },
+          { title: 'COMPLETED (PAID)', value: completed.length, icon: <CheckCircle size={18} color="#16A34A" /> },
+        ].map(k => (
+          <div key={k.title} style={{ background: 'white', border: '1px solid #E5E7EB', borderRadius: 12, padding: '18px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+            <div>
+              <p style={{ fontSize: 11, fontWeight: 700, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>{k.title}</p>
+              <p style={{ fontSize: 28, fontWeight: 700, color: '#111827' }}>{k.value}</p>
+            </div>
+            <div style={{ color: '#9CA3AF' }}>{k.icon}</div>
+          </div>
+        ))}
       </div>
 
-      {/* Table Card */}
-      <div style={cardStyle}>
-        {/* Tabs */}
-        <div style={{ padding: '16px 20px', borderBottom: '1px solid #E5E7EB', display: 'flex', alignItems: 'center', gap: 6, background: '#fff' }}>
-          <button style={tabBtnStyle(activeTab === 'ready')}     onClick={() => setActiveTab('ready')}>
-            Ready for Execution
-            {kpiReady > 0 && (
-              <span style={{ marginLeft: 8, background: '#3B82F6', color: '#fff', borderRadius: 999, padding: '1px 7px', fontSize: 11, fontWeight: 700 }}>
-                {kpiReady}
-              </span>
-            )}
-          </button>
-          <button style={tabBtnStyle(activeTab === 'completed')} onClick={() => setActiveTab('completed')}>
-            Completed
-            {kpiCompleted + kpiInitiated > 0 && (
-              <span style={{ marginLeft: 8, background: '#22C55E', color: '#fff', borderRadius: 999, padding: '1px 7px', fontSize: 11, fontWeight: 700 }}>
-                {kpiCompleted + kpiInitiated}
-              </span>
-            )}
+      <div style={{ background: 'white', borderRadius: 12, border: '1px solid #E5E7EB', overflow: 'hidden' }}>
+        <div style={{ display: 'flex', borderBottom: '1px solid #E5E7EB', padding: '0 20px', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ display: 'flex' }}>
+            {['Ready for Execution', 'Completed'].map((t, i) => (
+              <button key={t} onClick={() => setTab(i)} style={{ padding: '14px 18px', fontSize: 13, fontWeight: tab === i ? 700 : 500, color: tab === i ? '#0A2540' : '#6B7280', background: 'none', border: 'none', borderBottom: `2px solid ${tab === i ? '#0A2540' : 'transparent'}`, cursor: 'pointer', marginBottom: -1 }}>{t}</button>
+            ))}
+          </div>
+          <button onClick={load} style={{ display: 'flex', alignItems: 'center', gap: 6, border: '1px solid #D1D5DB', borderRadius: 8, padding: '6px 12px', background: 'white', cursor: 'pointer', fontSize: 12, color: '#374151' }}>
+            <RefreshCw size={13} /> Refresh
           </button>
         </div>
 
-        {/* Table */}
         {loading ? (
-          <div style={{ padding: 48, textAlign: 'center', color: '#9CA3AF', fontSize: 14 }}>
-            <div style={{ width: 28, height: 28, border: '3px solid #E5E7EB', borderTopColor: '#1E3A5F', borderRadius: '50%', animation: 'spin 0.8s linear infinite', margin: '0 auto 12px' }} />
-            Loading payment requests…
-          </div>
-        ) : tableRows.length === 0 ? (
-          <div style={{ padding: 56, textAlign: 'center' }}>
-            <div style={{ fontSize: 40, marginBottom: 12 }}>{activeTab === 'ready' ? '⚡' : '🎉'}</div>
-            <div style={{ fontSize: 15, fontWeight: 600, color: '#374151' }}>
-              {activeTab === 'ready' ? 'No requests awaiting execution' : 'No completed payments yet'}
-            </div>
-            <div style={{ fontSize: 13, color: '#9CA3AF', marginTop: 6 }}>
-              {activeTab === 'ready' ? 'All payments have been processed.' : 'Completed payments will appear here.'}
-            </div>
+          <div style={{ padding: 60, textAlign: 'center', color: '#9CA3AF' }}>Loading...</div>
+        ) : activeList.length === 0 ? (
+          <div style={{ padding: 60, textAlign: 'center' }}>
+            <CheckCircle size={36} color="#D1FAE5" style={{ margin: '0 auto 12px' }} />
+            <p style={{ fontSize: 14, color: '#6B7280' }}>{tab === 0 ? 'No requests ready for execution' : 'No completed payments yet'}</p>
           </div>
         ) : (
           <div style={{ overflowX: 'auto' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead>
-                <tr>
-                  <th style={thStyle}>Request ID</th>
-                  <th style={thStyle}>Beneficiary</th>
-                  <th style={thStyle}>Agent</th>
-                  <th style={{ ...thStyle, textAlign: 'right' }}>USD Equiv.</th>
-                  <th style={thStyle}>Swift Code</th>
-                  <th style={thStyle}>Bank</th>
-                  <th style={thStyle}>Status</th>
-                  <th style={{ ...thStyle, textAlign: 'center' }}>Actions</th>
+                <tr style={{ background: '#F9FAFB' }}>
+                  {['REQUEST ID', 'BENEFICIARY', 'AGENT', 'USD EQUIV.', 'SWIFT CODE', 'BANK', 'STATUS', 'ACTIONS'].map(h => (
+                    <th key={h} style={{ padding: '10px 16px', fontSize: 11, fontWeight: 700, color: '#6B7280', textAlign: 'left', letterSpacing: '0.05em', whiteSpace: 'nowrap' }}>{h}</th>
+                  ))}
                 </tr>
               </thead>
               <tbody>
-                {tableRows.map((req) => (
-                  <tr key={req.id} style={{ transition: 'background 0.15s' }}
-                    onMouseEnter={(e) => (e.currentTarget.style.background = '#FAFAFA')}
-                    onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}>
-                    {/* REQUEST ID */}
-                    <td style={tdStyle}>
-                      <button onClick={() => setTimelineTarget(req.id)} style={{
-                        fontFamily: 'monospace', fontSize: 13, fontWeight: 700, color: '#1D4ED8',
-                        background: '#EFF6FF', border: 'none', borderRadius: 6, padding: '3px 8px',
-                        cursor: 'pointer', letterSpacing: 0.5,
-                      }}>
-                        {req.requestId}
-                      </button>
-                    </td>
-                    {/* BENEFICIARY */}
-                    <td style={{ ...tdStyle, fontWeight: 600, color: '#111827', maxWidth: 160 }}>
-                      <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{req.beneficiary}</div>
-                    </td>
-                    {/* AGENT */}
-                    <td style={{ ...tdStyle, maxWidth: 140 }}>
-                      <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#6B7280' }}>{req.agent}</div>
-                    </td>
-                    {/* USD EQUIV */}
-                    <td style={{ ...tdStyle, textAlign: 'right', fontFamily: 'monospace', fontWeight: 700, color: '#059669', fontSize: 14 }}>
-                      ${req.usdEquivalent?.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                    </td>
-                    {/* SWIFT */}
-                    <td style={tdStyle}>
-                      <span style={{ fontFamily: 'monospace', fontSize: 12, background: '#F3F4F6', padding: '2px 7px', borderRadius: 5, color: '#374151' }}>
-                        {req.swiftCode}
-                      </span>
-                    </td>
-                    {/* BANK */}
-                    <td style={{ ...tdStyle, maxWidth: 160 }}>
-                      <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{req.bank}</div>
-                    </td>
-                    {/* STATUS */}
-                    <td style={tdStyle}><StatusChip status={req.status} /></td>
-                    {/* ACTIONS */}
-                    <td style={{ ...tdStyle, textAlign: 'center' }}>
-                      {activeTab === 'ready' ? (
-                        <div style={{ display: 'flex', gap: 8, justifyContent: 'center', flexWrap: 'wrap' }}>
-                          {req.status === 'Ready for SG AP Execution' && (
-                            <button
-                              onClick={() => handleMarkInitiated(req)}
-                              disabled={!!initiating[req.id]}
-                              style={{
-                                padding: '7px 13px', borderRadius: 7, border: 'none',
-                                background: initiating[req.id] ? '#93C5FD' : '#1E3A5F',
-                                color: '#fff', fontSize: 12, fontWeight: 700,
-                                cursor: initiating[req.id] ? 'not-allowed' : 'pointer',
-                                whiteSpace: 'nowrap', transition: 'background 0.2s',
-                                display: 'flex', alignItems: 'center', gap: 5,
-                              }}
-                              title="Mark Payment as Initiated"
-                            >
-                              {initiating[req.id]
-                                ? <><span style={{ display: 'inline-block', width: 11, height: 11, border: '2px solid #fff', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 0.7s linear infinite' }} /> Initiating…</>
-                                : <>🔄 Mark Initiated</>
-                              }
-                            </button>
-                          )}
-                          <button
-                            onClick={() => setUploadTarget(req)}
-                            style={{
-                              padding: '7px 13px', borderRadius: 7, border: 'none',
-                              background: '#16A34A', color: '#fff', fontSize: 12, fontWeight: 700,
-                              cursor: 'pointer', whiteSpace: 'nowrap', transition: 'background 0.2s',
-                              display: 'flex', alignItems: 'center', gap: 5,
-                            }}
-                            title="Upload MT103 and Mark Paid"
-                          >
-                            📎 Upload MT103 &amp; Mark Paid
+                {activeList.map(req => (
+                  <tr key={req.id} style={{ borderTop: '1px solid #F3F4F6' }}
+                    onMouseEnter={e => e.currentTarget.style.background = '#F9FAFB'}
+                    onMouseLeave={e => e.currentTarget.style.background = 'white'}>
+                    <td style={{ padding: '12px 16px', fontSize: 12, fontWeight: 700, color: '#1D4ED8', fontFamily: 'monospace' }}>{req.requestId}</td>
+                    <td style={{ padding: '12px 16px', fontSize: 12, color: '#374151', maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{req.beneficiaryName}</td>
+                    <td style={{ padding: '12px 16px', fontSize: 12, color: '#374151' }}>{req.agentCode}</td>
+                    <td style={{ padding: '12px 16px', fontSize: 12, fontWeight: 600 }}>$ {parseFloat(req.usdEquivalent).toLocaleString('en-US', { minimumFractionDigits: 2 })}</td>
+                    <td style={{ padding: '12px 16px', fontSize: 12, color: '#374151', fontFamily: 'monospace' }}>{req.swiftCode || '—'}</td>
+                    <td style={{ padding: '12px 16px', fontSize: 12, color: '#374151', maxWidth: 130, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{req.remittanceBank || '—'}</td>
+                    <td style={{ padding: '12px 16px' }}><StatusChip status={req.status} /></td>
+                    <td style={{ padding: '12px 16px' }}>
+                      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                        <button onClick={() => setViewId(req.id)} style={{ display: 'flex', alignItems: 'center', gap: 4, background: 'none', border: 'none', color: '#6B7280', cursor: 'pointer', fontSize: 12 }}><Eye size={13} /> Timeline</button>
+                        {req.status === 'Ready for SG AP Execution' && (
+                          <button onClick={() => markInitiated(req.id)} style={{ background: '#0A2540', color: 'white', border: 'none', borderRadius: 6, padding: '4px 10px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>Mark Initiated</button>
+                        )}
+                        {['Ready for SG AP Execution', 'Payment Initiated'].includes(req.status) && (
+                          <button onClick={() => setUploadPr(req)} style={{ background: '#16A34A', color: 'white', border: 'none', borderRadius: 6, padding: '4px 10px', fontSize: 12, fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}>
+                            <Upload size={12} /> Upload MT103
                           </button>
-                        </div>
-                      ) : (
-                        <div style={{ display: 'flex', gap: 8, justifyContent: 'center', flexWrap: 'wrap', alignItems: 'center' }}>
-                          {req.mt103Url ? (
-                            <a
-                              href={req.mt103Url}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              style={{
-                                padding: '7px 13px', borderRadius: 7,
-                                background: '#EFF6FF', color: '#1D4ED8',
-                                fontSize: 12, fontWeight: 700, textDecoration: 'none',
-                                display: 'flex', alignItems: 'center', gap: 5, whiteSpace: 'nowrap',
-                                border: '1px solid #BFDBFE',
-                              }}
-                            >
-                              📄 Download MT103
-                            </a>
-                          ) : (
-                            <span style={{ fontSize: 12, color: '#9CA3AF', fontStyle: 'italic' }}>No MT103</span>
-                          )}
-                          <button onClick={() => setTimelineTarget(req.id)} style={{
-                            padding: '7px 11px', borderRadius: 7, border: '1px solid #E5E7EB',
-                            background: '#F9FAFB', color: '#6B7280', fontSize: 12, fontWeight: 600,
-                            cursor: 'pointer', whiteSpace: 'nowrap',
-                          }}>
-                            🕐 Timeline
-                          </button>
-                        </div>
-                      )}
+                        )}
+                        {tab === 1 && req.mt103Url && req.mt103Url !== 'STORED_IN_PG' && (
+                          <a href={req.mt103Url} download={`MT103-${req.requestId}.pdf`} style={{ display: 'flex', alignItems: 'center', gap: 4, color: '#DC2626', fontSize: 12, fontWeight: 600, textDecoration: 'none' }}>
+                            <Download size={13} /> MT103
+                          </a>
+                        )}
+                        {tab === 1 && req.mt103Url === 'STORED_IN_PG' && (
+                          <span style={{ fontSize: 11, color: '#16A34A', fontWeight: 600 }}>✓ MT103 in PG</span>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -589,61 +143,100 @@ const SGAPDashboard: React.FC = () => {
             </table>
           </div>
         )}
-
-        {/* Footer count */}
-        {!loading && tableRows.length > 0 && (
-          <div style={{ padding: '12px 20px', borderTop: '1px solid #F3F4F6', fontSize: 12, color: '#9CA3AF', background: '#FAFAFA' }}>
-            Showing {tableRows.length} record{tableRows.length !== 1 ? 's' : ''}
-          </div>
-        )}
       </div>
 
-      {/* Upload Modal */}
-      {uploadTarget && (
-        <UploadModal
-          request={uploadTarget}
-          onClose={() => setUploadTarget(null)}
-          onSuccess={() => { fetchRequests(); showToast('Payment marked as Paid. MT103 uploaded.', 'success'); }}
-        />
-      )}
-
-      {/* Timeline Modal */}
-      {timelineTarget && (
-        <div style={{
-          position: 'fixed', inset: 0, background: 'rgba(17,24,39,0.45)',
-          backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center',
-          justifyContent: 'center', zIndex: 9998,
-        }} onClick={(e) => { if (e.target === e.currentTarget) setTimelineTarget(null); }}>
-          <div style={{
-            background: '#fff', borderRadius: 16, padding: '28px 32px',
-            width: '100%', maxWidth: 560, boxShadow: '0 20px 60px rgba(0,0,0,0.18)',
-            maxHeight: '80vh', overflowY: 'auto',
-          }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-              <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: '#111827' }}>Request Timeline</h2>
-              <button onClick={() => setTimelineTarget(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 20, color: '#9CA3AF' }}>✕</button>
-            </div>
-            <RequestTimeline requestId={timelineTarget} />
-          </div>
-        </div>
-      )}
-
-      {/* Toast */}
-      {toast && (
-        <div style={{
-          position: 'fixed', bottom: 28, right: 28, zIndex: 99999,
-          background: toast.type === 'success' ? '#065F46' : '#7F1D1D',
-          color: '#fff', borderRadius: 12, padding: '14px 20px',
-          fontSize: 14, fontWeight: 600, boxShadow: '0 8px 30px rgba(0,0,0,0.2)',
-          display: 'flex', alignItems: 'center', gap: 10, maxWidth: 360,
-          animation: 'fadeIn 0.3s ease',
-        }}>
-          <span style={{ fontSize: 18 }}>{toast.type === 'success' ? '✅' : '⚠️'}</span>
-          {toast.msg}
-        </div>
-      )}
+      {viewId && <RequestTimeline requestId={viewId} onClose={() => setViewId(null)} />}
+      {uploadPr && <MT103UploadModal pr={uploadPr} user={user} onClose={() => setUploadPr(null)} onSuccess={() => { setUploadPr(null); load(); }} />}
     </div>
   );
-};
+}
 
-export default SGAPDashboard;
+function MT103UploadModal({ pr, user, onClose, onSuccess }: any) {
+  const [file, setFile] = useState<File | null>(null);
+  const [releaseDate, setReleaseDate] = useState('');
+  const [lmsEntry, setLmsEntry] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!releaseDate) { setError('Release date is required'); return; }
+    setSubmitting(true); setError('');
+    try {
+      const fd = new FormData();
+      fd.append('actualReleaseDate', releaseDate);
+      fd.append('lmsEntry', String(lmsEntry));
+      if (file) fd.append('mt103', file);
+      await api.post(`/payment-requests/${pr.id}/execute-payment`, fd, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      });
+      onSuccess();
+    } catch (err: any) { setError(err.response?.data?.message || 'Upload failed'); }
+    finally { setSubmitting(false); }
+  }
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px' }}>
+      <div style={{ background: 'white', borderRadius: 12, width: '100%', maxWidth: 500, boxShadow: '0 20px 60px rgba(0,0,0,0.2)' }} onClick={e => e.stopPropagation()}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '18px 24px', borderBottom: '1px solid #E5E7EB' }}>
+          <div>
+            <h3 style={{ fontSize: 16, fontWeight: 700, color: '#111827' }}>Upload MT103 &amp; Mark Paid</h3>
+            <p style={{ fontSize: 12, color: '#6B7280' }}>{pr.requestId} · {pr.beneficiaryName}</p>
+          </div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#6B7280' }}><X size={18} /></button>
+        </div>
+        <div style={{ padding: '20px 24px' }}>
+          <div style={{ background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 8, padding: '10px 14px', marginBottom: 16 }}>
+            <p style={{ fontSize: 12, color: '#166534', fontWeight: 600 }}>✓ File will be stored as base64 in PostgreSQL JSONB — no disk or MongoDB</p>
+          </div>
+          <div style={{ background: '#F9FAFB', borderRadius: 8, padding: '12px 14px', marginBottom: 16, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, fontSize: 12 }}>
+            <div><span style={{ color: '#6B7280' }}>SWIFT:</span> <strong>{pr.swiftCode || '—'}</strong></div>
+            <div><span style={{ color: '#6B7280' }}>USD Equiv:</span> <strong>$ {parseFloat(pr.usdEquivalent).toLocaleString('en-US', { minimumFractionDigits: 2 })}</strong></div>
+            <div><span style={{ color: '#6B7280' }}>Bank:</span> <strong style={{ fontSize: 11 }}>{pr.remittanceBank || '—'}</strong></div>
+            <div><span style={{ color: '#6B7280' }}>Account:</span> <strong>{pr.bankAccountNumber || '—'}</strong></div>
+          </div>
+
+          <form onSubmit={handleSubmit}>
+            {/* MT103 Upload Zone */}
+            <div style={{ marginBottom: 16 }}>
+              <label style={labelStyle}>MT103 SWIFT Document (PDF)</label>
+              <div onClick={() => fileRef.current?.click()} style={{ border: '2px dashed #D1D5DB', borderRadius: 8, padding: '24px', textAlign: 'center', cursor: 'pointer', background: '#FAFAFA' }}>
+                <Upload size={22} color="#9CA3AF" style={{ margin: '0 auto 6px' }} />
+                {file ? (
+                  <p style={{ fontSize: 13, color: '#16A34A', fontWeight: 600 }}>✓ {file.name}</p>
+                ) : (
+                  <>
+                    <p style={{ fontSize: 12, color: '#6B7280' }}>Drag &amp; drop MT103 PDF or click to browse</p>
+                    <p style={{ fontSize: 11, color: '#DC2626', fontWeight: 600, marginTop: 2 }}>browse file</p>
+                  </>
+                )}
+                <input ref={fileRef} type="file" accept=".pdf,.PDF" style={{ display: 'none' }} onChange={e => setFile(e.target.files?.[0] || null)} />
+              </div>
+            </div>
+
+            <div style={{ marginBottom: 14 }}>
+              <label style={labelStyle}>Actual Release / Value Date *</label>
+              <input type="date" style={inputStyle} value={releaseDate} onChange={e => setReleaseDate(e.target.value)} />
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
+              <input type="checkbox" id="lms-entry" checked={lmsEntry} onChange={e => setLmsEntry(e.target.checked)} style={{ width: 16, height: 16, cursor: 'pointer' }} />
+              <label htmlFor="lms-entry" style={{ fontSize: 13, color: '#374151', cursor: 'pointer' }}>LMS Entry Recorded</label>
+            </div>
+
+            {error && <div style={{ marginBottom: 12, padding: '10px 14px', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 8, fontSize: 12, color: '#DC2626', display: 'flex', gap: 8 }}><AlertCircle size={14} style={{ flexShrink: 0, marginTop: 1 }} />{error}</div>}
+
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+              <button type="button" onClick={onClose} style={{ padding: '9px 18px', border: '1px solid #D1D5DB', borderRadius: 8, background: 'white', cursor: 'pointer', fontSize: 13 }}>Cancel</button>
+              <button type="submit" disabled={submitting} style={{ padding: '9px 20px', background: '#16A34A', color: 'white', border: 'none', borderRadius: 8, cursor: 'pointer', fontSize: 13, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <CheckCircle size={14} />
+                {submitting ? 'Uploading...' : 'Mark Paid & Save MT103'}
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  );
+}

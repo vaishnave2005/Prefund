@@ -4,20 +4,15 @@ import { PaymentRequestsController } from './payment-requests.controller';
 import { PaymentRequestsService } from './payment-requests.service';
 import { PaymentRequest, AgentMaster, Notification, AuditLog, SystemConfig } from '../entities';
 import { MulterModule } from '@nestjs/platform-express';
-import { diskStorage } from 'multer';
-import { extname, join } from 'path';
+import { memoryStorage } from 'multer';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([PaymentRequest, AgentMaster, Notification, AuditLog, SystemConfig]),
     MulterModule.register({
-      storage: diskStorage({
-        destination: join(process.cwd(), 'uploads'),
-        filename: (req, file, cb) => {
-          const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-          cb(null, uniqueSuffix + extname(file.originalname));
-        },
-      }),
+      // Use memory storage — files stored as base64 in PostgreSQL JSONB, NOT on disk
+      storage: memoryStorage(),
+      limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB max
     }),
   ],
   controllers: [PaymentRequestsController],

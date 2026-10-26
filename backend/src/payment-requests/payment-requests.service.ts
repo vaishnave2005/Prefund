@@ -128,8 +128,7 @@ export class PaymentRequestsService {
           statuses: ['Under GFSU Review', 'Clarified - Under GFSU Review', 'Query Raised'],
         });
       } else if (query.queue === 'post-treasury') {
-        qb = qb.where('pr.assigned_gfsu_member = :name AND pr.status = :status', {
-          name: user.fullName,
+        qb = qb.where('pr.status = :status', {
           status: 'Treasury Approved - Pending GFSU Verification',
         });
       } else {
@@ -330,9 +329,26 @@ export class PaymentRequestsService {
     const pr = await this.findOne(id);
     const prev = pr.status;
     if (mt103File) {
-      pr.mt103Url = `/uploads/${mt103File.filename}`;
+      // Store MT103 as base64 in PostgreSQL JSONB — no disk/MongoDB required
+      const base64Data = mt103File.buffer.toString('base64');
+      const dataUrl = `data:${mt103File.mimetype};base64,${base64Data}`;
+      pr.mt103Url = dataUrl;
+      // Also add to documents array
+      const docs = pr.documents || [];
+      docs.push({
+        name: mt103File.originalname,
+        type: mt103File.mimetype,
+        size: mt103File.size,
+        data: dataUrl,
+        docType: 'MT103',
+        uploadedBy: user.fullName,
+        uploadedAt: new Date().toISOString(),
+      });
+      pr.documents = docs;
     }
     pr.status = 'Paid';
+    pr.lmsEntry = body.lmsEntry === 'true' || body.lmsEntry === true;
+    if (body.actualReleaseDate) pr.actualReleaseDate = new Date(body.actualReleaseDate);
     pr.apRoutingEmail = body.apRoutingEmail || user.email;
     await this.prRepo.save(pr);
     await this.audit(pr.requestId, user.id, user.role, 'PAYMENT_EXECUTED', prev, 'Paid', 'MT103 uploaded, payment completed');
@@ -380,7 +396,17 @@ export class PaymentRequestsService {
   async addDocument(id: string, file: Express.Multer.File, user: any) {
     const pr = await this.findOne(id);
     const docs = pr.documents || [];
-    docs.push({ name: file.originalname, url: `/uploads/${file.filename}`, uploadedBy: user.fullName, uploadedAt: new Date().toISOString() });
+    // Store file content as base64 in PostgreSQL JSONB — no disk or external storage
+    const base64Data = file.buffer.toString('base64');
+    const dataUrl = `data:${file.mimetype};base64,${base64Data}`;
+    docs.push({
+      name: file.originalname,
+      type: file.mimetype,
+      size: file.size,
+      data: dataUrl,
+      uploadedBy: user.fullName,
+      uploadedAt: new Date().toISOString(),
+    });
     pr.documents = docs;
     await this.prRepo.save(pr);
     return pr;

@@ -1,790 +1,222 @@
-import React, { useEffect, useState, CSSProperties } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
+import { Eye, RefreshCw, Shield, DollarSign, Clock, X } from 'lucide-react';
 import api from '../../lib/api';
 import { useAuth } from '../../contexts/AuthContext';
+import { formatDate } from '../../lib/utils';
 import RequestTimeline from '../../components/shared/RequestTimeline';
 
-/* ─────────────────────────── types ─────────────────────────── */
-interface PaymentRequest {
-  id: string;
-  requestId: string;
-  type: string;
-  agentCode: string;
-  beneficiary: string;
-  usdEquivalent: number;
-  status: string;
-  cacObservation?: string;
-  remarks?: string;
+function TierBadge({ amount }: { amount: number }) {
+  const isT2 = amount > 50000;
+  return (
+    <span style={{ background: isT2 ? '#FEF3C7' : '#DBEAFE', color: isT2 ? '#B45309' : '#1D4ED8', padding: '2px 8px', borderRadius: 4, fontSize: 11, fontWeight: 700 }}>
+      {isT2 ? 'Tier 2' : 'Tier 1'}
+    </span>
+  );
 }
 
-/* ─────────────────────────── helpers ─────────────────────────── */
-const labelStyle: CSSProperties = {
-  display: 'block',
-  fontSize: 12,
-  fontWeight: 600,
-  color: '#6B7280',
-  marginBottom: 4,
-  textTransform: 'uppercase',
-  letterSpacing: '0.05em',
-};
-
-const inputStyle: CSSProperties = {
-  width: '100%',
-  padding: '10px 12px',
-  border: '1px solid #D1D5DB',
-  borderRadius: 8,
-  fontSize: 14,
-  color: '#111827',
-  outline: 'none',
-  boxSizing: 'border-box',
-  background: '#fff',
-  fontFamily: 'inherit',
-};
-
-const fmt = (n: number) =>
-  new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(n);
-
-/* ─── StatusChip ─── */
-const statusColors: Record<string, { bg: string; color: string; label: string }> = {
-  'CAC Approved': { bg: '#DBEAFE', color: '#1D4ED8', label: 'CAC Approved' },
-  'Clarified - Under Treasury Review': { bg: '#FEF3C7', color: '#92400E', label: 'Clarified · Under Review' },
-  'Treasury Approved - Pending GFSU Verification': { bg: '#D1FAE5', color: '#065F46', label: 'Treasury Approved' },
-  'Rejected by Treasury': { bg: '#FEE2E2', color: '#991B1B', label: 'Rejected by Treasury' },
-  'Query Raised': { bg: '#F3E8FF', color: '#6B21A8', label: 'Query Raised' },
-};
-
-const StatusChip: React.FC<{ status: string }> = ({ status }) => {
-  const cfg = statusColors[status] ?? { bg: '#F3F4F6', color: '#374151', label: status };
-  return (
-    <span
-      style={{
-        display: 'inline-block',
-        padding: '3px 10px',
-        borderRadius: 9999,
-        fontSize: 12,
-        fontWeight: 600,
-        background: cfg.bg,
-        color: cfg.color,
-        whiteSpace: 'nowrap',
-      }}
-    >
-      {cfg.label}
-    </span>
-  );
-};
-
-/* ─── TierBadge ─── */
-const TierBadge: React.FC<{ usdEquivalent: number }> = ({ usdEquivalent }) => {
-  const isTier1 = usdEquivalent <= 50000;
-  return (
-    <span
-      style={{
-        display: 'inline-block',
-        padding: '3px 10px',
-        borderRadius: 9999,
-        fontSize: 12,
-        fontWeight: 600,
-        background: isTier1 ? '#DBEAFE' : '#FEF3C7',
-        color: isTier1 ? '#1D4ED8' : '#92400E',
-      }}
-    >
-      {isTier1 ? 'Tier 1' : 'Tier 2'}
-    </span>
-  );
-};
-
-/* ─── KPI Card ─── */
-const KpiCard: React.FC<{ label: string; value: string | number; accent: string; icon: string }> = ({
-  label,
-  value,
-  accent,
-  icon,
-}) => (
-  <div
-    style={{
-      background: '#fff',
-      borderRadius: 14,
-      padding: '22px 26px',
-      boxShadow: '0 1px 4px rgba(0,0,0,0.07)',
-      display: 'flex',
-      alignItems: 'center',
-      gap: 18,
-      flex: 1,
-      minWidth: 200,
-    }}
-  >
-    <div
-      style={{
-        width: 48,
-        height: 48,
-        borderRadius: 12,
-        background: accent + '18',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        fontSize: 22,
-        flexShrink: 0,
-      }}
-    >
-      {icon}
-    </div>
-    <div>
-      <div style={{ fontSize: 12, fontWeight: 600, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 4 }}>
-        {label}
-      </div>
-      <div style={{ fontSize: 26, fontWeight: 700, color: '#111827' }}>{value}</div>
-    </div>
-  </div>
-);
-
-/* ─────────────────────────── main component ─────────────────────────── */
-const TreasuryDashboard: React.FC = () => {
-  const { user } = useAuth();
-
-  const [requests, setRequests] = useState<PaymentRequest[]>([]);
-  const [filtered, setFiltered] = useState<PaymentRequest[]>([]);
-  const [statusFilter, setStatusFilter] = useState('');
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-
-  /* modal state */
-  const [selected, setSelected] = useState<PaymentRequest | null>(null);
-  const [modalOpen, setModalOpen] = useState(false);
-  const [observation, setObservation] = useState('');
-  const [rejectionReason, setRejectionReason] = useState('');
-  const [queryTargetRole, setQueryTargetRole] = useState('CAC');
-  const [submitting, setSubmitting] = useState(false);
-  const [modalError, setModalError] = useState('');
-
-  /* timeline modal */
-  const [timelineRequestId, setTimelineRequestId] = useState<string | null>(null);
-  const [timelineOpen, setTimelineOpen] = useState(false);
-
-  /* ── fetch ── */
-  const fetchRequests = async () => {
-    setLoading(true);
-    setError('');
-    try {
-      const res = await api.get('/payment-requests?scope=treasury');
-      const data: PaymentRequest[] = res.data?.data ?? res.data ?? [];
-      setRequests(data);
-    } catch {
-      setError('Failed to load payment requests.');
-    } finally {
-      setLoading(false);
-    }
+function StatusChip({ status }: { status: string }) {
+  const map: Record<string, { bg: string; color: string }> = {
+    'CAC Approved':                      { bg: '#D1FAE5', color: '#065F46' },
+    'Clarified - Under Treasury Review': { bg: '#DBEAFE', color: '#1E40AF' },
+    'Treasury Approved - Pending GFSU Verification': { bg: '#E0F2FE', color: '#0369A1' },
   };
+  const s = map[status] || { bg: '#F1F5F9', color: '#475569' };
+  return <span style={{ background: s.bg, color: s.color, padding: '3px 10px', borderRadius: 20, fontSize: 11, fontWeight: 600, whiteSpace: 'nowrap' }}>{status}</span>;
+}
 
-  useEffect(() => {
-    fetchRequests();
+const labelStyle: React.CSSProperties = { display: 'block', fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 5 };
+const inputStyle: React.CSSProperties = { width: '100%', border: '1px solid #D1D5DB', borderRadius: 8, padding: '9px 12px', fontSize: 13, color: '#111827', background: 'white', outline: 'none', boxSizing: 'border-box' as const };
+
+export default function TreasuryDashboard() {
+  const { user } = useAuth();
+  const [requests, setRequests] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [viewId, setViewId] = useState<string | null>(null);
+  const [reviewPr, setReviewPr] = useState<any>(null);
+  const [threshold, setThreshold] = useState(50000);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [res, cfgRes] = await Promise.all([
+        api.get('/payment-requests'),
+        api.get('/config/threshold').catch(() => ({ data: { value: 50000 } })),
+      ]);
+      setRequests(res.data.items || []);
+      setThreshold(cfgRes.data?.value || 50000);
+    } catch (e) { console.error(e); }
+    finally { setLoading(false); }
   }, []);
 
-  useEffect(() => {
-    if (!statusFilter) {
-      setFiltered(requests);
-    } else {
-      setFiltered(requests.filter((r) => r.status === statusFilter));
-    }
-  }, [requests, statusFilter]);
+  useEffect(() => { load(); }, [load]);
 
-  /* ── KPI derived ── */
-  const pendingCount = requests.filter(
-    (r) => r.status === 'CAC Approved' || r.status === 'Clarified - Under Treasury Review'
-  ).length;
+  const pending = requests.length;
+  const tier1 = requests.filter(r => parseFloat(r.usdEquivalent) <= threshold).length;
+  const tier2 = requests.filter(r => parseFloat(r.usdEquivalent) > threshold).length;
 
-  const authorizedMonth = requests.filter((r) =>
-    r.status.startsWith('Treasury Approved')
-  ).length;
-
-  const totalAuthorizedMTD = fmt(
-    requests
-      .filter((r) => r.status.startsWith('Treasury Approved'))
-      .reduce((sum, r) => sum + (r.usdEquivalent ?? 0), 0)
-  );
-
-  /* ── open modal ── */
-  const openModal = (req: PaymentRequest) => {
-    setSelected(req);
-    setObservation('');
-    setRejectionReason('');
-    setQueryTargetRole('CAC');
-    setModalError('');
-    setModalOpen(true);
-  };
-
-  const closeModal = () => {
-    setModalOpen(false);
-    setSelected(null);
-  };
-
-  /* ── submit action ── */
-  const handleAction = async (action: 'approve' | 'reject' | 'query') => {
-    if (!selected) return;
-    if (!observation.trim()) {
-      setModalError('Treasury observation is required.');
-      return;
-    }
-    if (action === 'reject' && !rejectionReason.trim()) {
-      setModalError('Rejection reason is required.');
-      return;
-    }
-    setSubmitting(true);
-    setModalError('');
-    try {
-      await api.post(`/payment-requests/${selected.id}/treasury-review`, {
-        action,
-        observation: observation.trim(),
-        rejectionReason: action === 'reject' ? rejectionReason.trim() : undefined,
-        queryTargetRole: action === 'query' ? queryTargetRole : undefined,
-      });
-      closeModal();
-      await fetchRequests();
-    } catch (e: any) {
-      setModalError(e?.response?.data?.message ?? 'Submission failed. Please try again.');
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  /* ── unique statuses for filter ── */
-  const uniqueStatuses = Array.from(new Set(requests.map((r) => r.status)));
-
-  /* ─────────────────────────── render ─────────────────────────── */
   return (
-    <div style={{ minHeight: '100vh', background: '#F3F4F6', fontFamily: "'Inter', 'Segoe UI', sans-serif" }}>
-      {/* ── Header ── */}
-      <div style={{ background: '#fff', borderBottom: '1px solid #E5E7EB', padding: '0 36px' }}>
-        <div style={{ maxWidth: 1320, margin: '0 auto', padding: '20px 0' }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+    <div style={{ maxWidth: 1280, margin: '0 auto', padding: '32px 28px', fontFamily: "'Inter', system-ui, sans-serif" }}>
+      <div style={{ marginBottom: 24 }}>
+        <h1 style={{ fontSize: 26, fontWeight: 700, color: '#111827', marginBottom: 4 }}>SG Treasury Portal</h1>
+        <p style={{ fontSize: 13, color: '#6B7280' }}>Singapore Treasury — Payment Authorization · Tier threshold: USD {threshold.toLocaleString()}</p>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 16, marginBottom: 28 }}>
+        {[
+          { title: 'PENDING AUTHORIZATION', value: pending, icon: <Clock size={18} color="#D97706" /> },
+          { title: 'TIER 1 (≤ USD 50K)', value: tier1, icon: <Shield size={18} color="#1D4ED8" /> },
+          { title: 'TIER 2 (> USD 50K)', value: tier2, icon: <Shield size={18} color="#B45309" /> },
+        ].map(k => (
+          <div key={k.title} style={{ background: 'white', border: '1px solid #E5E7EB', borderRadius: 12, padding: '18px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
             <div>
-              <h1 style={{ fontSize: 26, fontWeight: 700, color: '#111827', margin: 0, lineHeight: 1.2 }}>
-                SG Treasury Portal
-              </h1>
-              <p style={{ margin: '4px 0 0', fontSize: 14, color: '#6B7280' }}>
-                Singapore Treasury — Payment Authorization
-              </p>
+              <p style={{ fontSize: 11, fontWeight: 700, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>{k.title}</p>
+              <p style={{ fontSize: 28, fontWeight: 700, color: '#111827' }}>{k.value}</p>
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <div
-                style={{
-                  width: 36,
-                  height: 36,
-                  borderRadius: '50%',
-                  background: '#1E3A5F',
-                  color: '#fff',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  fontWeight: 700,
-                  fontSize: 14,
-                }}
-              >
-                {user?.name?.charAt(0) ?? 'T'}
-              </div>
-              <span style={{ fontSize: 14, color: '#374151', fontWeight: 500 }}>{user?.name ?? 'Treasury Officer'}</span>
-            </div>
+            <div style={{ color: '#9CA3AF' }}>{k.icon}</div>
           </div>
-        </div>
+        ))}
       </div>
 
-      <div style={{ maxWidth: 1320, margin: '0 auto', padding: '32px 36px' }}>
-        {/* ── KPI Cards ── */}
-        <div style={{ display: 'flex', gap: 20, marginBottom: 32, flexWrap: 'wrap' }}>
-          <KpiCard label="Pending Authorization" value={pendingCount} accent="#1D4ED8" icon="⏳" />
-          <KpiCard label="Authorized This Month" value={authorizedMonth} accent="#059669" icon="✅" />
-          <KpiCard label="Total Authorized (MTD)" value={totalAuthorizedMTD} accent="#7C3AED" icon="💰" />
+      <div style={{ background: 'white', borderRadius: 12, border: '1px solid #E5E7EB', overflow: 'hidden' }}>
+        <div style={{ padding: '16px 20px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid #F3F4F6' }}>
+          <h2 style={{ fontSize: 15, fontWeight: 700, color: '#111827' }}>Requests Pending Treasury Authorization</h2>
+          <button onClick={load} style={{ display: 'flex', alignItems: 'center', gap: 6, border: '1px solid #D1D5DB', borderRadius: 8, padding: '6px 12px', background: 'white', cursor: 'pointer', fontSize: 12, color: '#374151' }}>
+            <RefreshCw size={13} /> Refresh
+          </button>
         </div>
 
-        {/* ── Table Card ── */}
-        <div
-          style={{
-            background: '#fff',
-            borderRadius: 14,
-            boxShadow: '0 1px 4px rgba(0,0,0,0.07)',
-            overflow: 'hidden',
-          }}
-        >
-          {/* Table header row */}
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              padding: '18px 24px',
-              borderBottom: '1px solid #F3F4F6',
-            }}
-          >
-            <div style={{ fontSize: 16, fontWeight: 700, color: '#111827' }}>Payment Requests</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-              <select
-                id="status-filter"
-                value={statusFilter}
-                onChange={(e) => setStatusFilter(e.target.value)}
-                style={{
-                  ...inputStyle,
-                  width: 260,
-                  padding: '8px 12px',
-                  fontSize: 13,
-                  cursor: 'pointer',
-                }}
-              >
-                <option value="">All Statuses</option>
-                {uniqueStatuses.map((s) => (
-                  <option key={s} value={s}>{s}</option>
-                ))}
-              </select>
-              <button
-                onClick={fetchRequests}
-                style={{
-                  padding: '8px 16px',
-                  background: '#F3F4F6',
-                  border: '1px solid #E5E7EB',
-                  borderRadius: 8,
-                  cursor: 'pointer',
-                  fontSize: 13,
-                  color: '#374151',
-                  fontWeight: 500,
-                }}
-              >
-                ↺ Refresh
-              </button>
-            </div>
+        {loading ? (
+          <div style={{ padding: 60, textAlign: 'center', color: '#9CA3AF' }}>Loading...</div>
+        ) : requests.length === 0 ? (
+          <div style={{ padding: 60, textAlign: 'center' }}>
+            <Shield size={36} color="#D1FAE5" style={{ margin: '0 auto 12px' }} />
+            <p style={{ fontSize: 14, color: '#6B7280' }}>No requests pending Treasury authorization</p>
           </div>
-
-          {loading ? (
-            <div style={{ padding: 48, textAlign: 'center', color: '#6B7280' }}>Loading requests…</div>
-          ) : error ? (
-            <div style={{ padding: 48, textAlign: 'center', color: '#DC2626' }}>{error}</div>
-          ) : filtered.length === 0 ? (
-            <div style={{ padding: 48, textAlign: 'center', color: '#9CA3AF' }}>No payment requests found.</div>
-          ) : (
-            <div style={{ overflowX: 'auto' }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-                <thead>
-                  <tr style={{ background: '#F9FAFB' }}>
-                    {['REQUEST ID', 'TYPE', 'AGENT', 'BENEFICIARY', 'USD EQUIV.', 'TIER', 'STATUS', 'ACTIONS'].map(
-                      (col) => (
-                        <th
-                          key={col}
-                          style={{
-                            padding: '12px 16px',
-                            textAlign: 'left',
-                            fontSize: 11,
-                            fontWeight: 700,
-                            color: '#6B7280',
-                            letterSpacing: '0.07em',
-                            textTransform: 'uppercase',
-                            borderBottom: '1px solid #E5E7EB',
-                            whiteSpace: 'nowrap',
-                          }}
-                        >
-                          {col}
-                        </th>
-                      )
-                    )}
-                  </tr>
-                </thead>
-                <tbody>
-                  {filtered.map((req, idx) => (
-                    <tr
-                      key={req.id}
-                      style={{
-                        background: idx % 2 === 0 ? '#fff' : '#FAFAFA',
-                        transition: 'background 0.15s',
-                      }}
-                      onMouseEnter={(e) => ((e.currentTarget as HTMLTableRowElement).style.background = '#EFF6FF')}
-                      onMouseLeave={(e) =>
-                        ((e.currentTarget as HTMLTableRowElement).style.background =
-                          idx % 2 === 0 ? '#fff' : '#FAFAFA')
-                      }
-                    >
-                      <td style={{ padding: '13px 16px', color: '#1D4ED8', fontWeight: 600, borderBottom: '1px solid #F3F4F6' }}>
-                        {req.requestId}
-                      </td>
-                      <td style={{ padding: '13px 16px', color: '#374151', borderBottom: '1px solid #F3F4F6' }}>{req.type}</td>
-                      <td style={{ padding: '13px 16px', color: '#374151', borderBottom: '1px solid #F3F4F6' }}>{req.agentCode}</td>
-                      <td style={{ padding: '13px 16px', color: '#374151', borderBottom: '1px solid #F3F4F6', maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {req.beneficiary}
-                      </td>
-                      <td style={{ padding: '13px 16px', color: '#111827', fontWeight: 600, borderBottom: '1px solid #F3F4F6', whiteSpace: 'nowrap' }}>
-                        {fmt(req.usdEquivalent)}
-                      </td>
-                      <td style={{ padding: '13px 16px', borderBottom: '1px solid #F3F4F6' }}>
-                        <TierBadge usdEquivalent={req.usdEquivalent} />
-                      </td>
-                      <td style={{ padding: '13px 16px', borderBottom: '1px solid #F3F4F6' }}>
-                        <StatusChip status={req.status} />
-                      </td>
-                      <td style={{ padding: '13px 16px', borderBottom: '1px solid #F3F4F6' }}>
-                        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                          {(req.status === 'CAC Approved' || req.status === 'Clarified - Under Treasury Review') && (
-                            <button
-                              id={`authorize-btn-${req.id}`}
-                              onClick={() => openModal(req)}
-                              style={{
-                                padding: '6px 14px',
-                                background: '#1E3A5F',
-                                color: '#fff',
-                                border: 'none',
-                                borderRadius: 7,
-                                cursor: 'pointer',
-                                fontSize: 12,
-                                fontWeight: 600,
-                                whiteSpace: 'nowrap',
-                                transition: 'background 0.15s',
-                              }}
-                              onMouseEnter={(e) => ((e.currentTarget as HTMLButtonElement).style.background = '#162D4A')}
-                              onMouseLeave={(e) => ((e.currentTarget as HTMLButtonElement).style.background = '#1E3A5F')}
-                            >
-                              Authorize
-                            </button>
-                          )}
-                          <button
-                            id={`timeline-btn-${req.id}`}
-                            title="View Timeline"
-                            onClick={() => {
-                              setTimelineRequestId(req.id);
-                              setTimelineOpen(true);
-                            }}
-                            style={{
-                              width: 32,
-                              height: 32,
-                              display: 'flex',
-                              alignItems: 'center',
-                              justifyContent: 'center',
-                              background: '#F3F4F6',
-                              border: '1px solid #E5E7EB',
-                              borderRadius: 7,
-                              cursor: 'pointer',
-                              fontSize: 15,
-                              color: '#6B7280',
-                              transition: 'background 0.15s',
-                            }}
-                            onMouseEnter={(e) => ((e.currentTarget as HTMLButtonElement).style.background = '#E5E7EB')}
-                            onMouseLeave={(e) => ((e.currentTarget as HTMLButtonElement).style.background = '#F3F4F6')}
-                          >
-                            👁
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <thead>
+                <tr style={{ background: '#F9FAFB' }}>
+                  {['REQUEST ID', 'TYPE', 'AGENT', 'BENEFICIARY', 'USD EQUIV.', 'TIER', 'CAC OBSERVATION', 'DATE', 'STATUS', 'ACTIONS'].map(h => (
+                    <th key={h} style={{ padding: '10px 16px', fontSize: 11, fontWeight: 700, color: '#6B7280', textAlign: 'left', letterSpacing: '0.05em', whiteSpace: 'nowrap' }}>{h}</th>
                   ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
+                </tr>
+              </thead>
+              <tbody>
+                {requests.map(req => (
+                  <tr key={req.id} style={{ borderTop: '1px solid #F3F4F6' }}
+                    onMouseEnter={e => e.currentTarget.style.background = '#F9FAFB'}
+                    onMouseLeave={e => e.currentTarget.style.background = 'white'}>
+                    <td style={{ padding: '12px 16px', fontSize: 12, fontWeight: 700, color: '#1D4ED8', fontFamily: 'monospace' }}>{req.requestId}</td>
+                    <td style={{ padding: '12px 16px', fontSize: 12, color: '#374151' }}>{req.requestType}</td>
+                    <td style={{ padding: '12px 16px', fontSize: 12, color: '#374151' }}>{req.agentCode}</td>
+                    <td style={{ padding: '12px 16px', fontSize: 12, color: '#374151', maxWidth: 130, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{req.beneficiaryName}</td>
+                    <td style={{ padding: '12px 16px', fontSize: 12, fontWeight: 600 }}>$ {parseFloat(req.usdEquivalent).toLocaleString('en-US', { minimumFractionDigits: 2 })}</td>
+                    <td style={{ padding: '12px 16px' }}><TierBadge amount={parseFloat(req.usdEquivalent)} /></td>
+                    <td style={{ padding: '12px 16px', fontSize: 11, color: '#6B7280', maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{req.cacObservation || '—'}</td>
+                    <td style={{ padding: '12px 16px', fontSize: 11, color: '#9CA3AF' }}>{formatDate(req.createdAt)}</td>
+                    <td style={{ padding: '12px 16px' }}><StatusChip status={req.status} /></td>
+                    <td style={{ padding: '12px 16px' }}>
+                      <div style={{ display: 'flex', gap: 8 }}>
+                        <button onClick={() => setViewId(req.id)} style={{ display: 'flex', alignItems: 'center', gap: 4, background: 'none', border: 'none', color: '#6B7280', cursor: 'pointer', fontSize: 12 }}><Eye size={13} /> Timeline</button>
+                        <button onClick={() => setReviewPr(req)} style={{ background: '#0A2540', color: 'white', border: 'none', borderRadius: 6, padding: '4px 12px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>Authorize</button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
-      {/* ══════════════════ Treasury Review Modal ══════════════════ */}
-      {modalOpen && selected && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'rgba(0,0,0,0.45)',
-            zIndex: 1000,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            padding: 24,
-          }}
-          onClick={(e) => { if (e.target === e.currentTarget) closeModal(); }}
-        >
-          <div
-            style={{
-              background: '#fff',
-              borderRadius: 16,
-              padding: 32,
-              width: '100%',
-              maxWidth: 580,
-              maxHeight: '92vh',
-              overflowY: 'auto',
-              boxShadow: '0 20px 60px rgba(0,0,0,0.18)',
-            }}
-          >
-            {/* Modal header */}
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24 }}>
-              <div>
-                <div style={{ fontSize: 18, fontWeight: 700, color: '#111827' }}>Treasury Review</div>
-                <div style={{ fontSize: 13, color: '#6B7280', marginTop: 2 }}>Authorize, query or reject this request</div>
-              </div>
-              <button
-                onClick={closeModal}
-                style={{
-                  width: 32,
-                  height: 32,
-                  border: 'none',
-                  background: '#F3F4F6',
-                  borderRadius: 8,
-                  cursor: 'pointer',
-                  fontSize: 18,
-                  color: '#6B7280',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                }}
-              >
-                ×
-              </button>
-            </div>
-
-            {/* Request Summary */}
-            <div
-              style={{
-                background: '#F9FAFB',
-                border: '1px solid #E5E7EB',
-                borderRadius: 10,
-                padding: 18,
-                marginBottom: 20,
-              }}
-            >
-              <div style={{ fontSize: 12, fontWeight: 700, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 14 }}>
-                Request Summary
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px 24px' }}>
-                {[
-                  { label: 'Request ID', value: selected.requestId },
-                  { label: 'Beneficiary', value: selected.beneficiary },
-                  { label: 'Agent Code', value: selected.agentCode },
-                  { label: 'USD Equivalent', value: fmt(selected.usdEquivalent) },
-                ].map(({ label, value }) => (
-                  <div key={label}>
-                    <div style={{ fontSize: 11, color: '#9CA3AF', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>{label}</div>
-                    <div style={{ fontSize: 14, fontWeight: 600, color: '#111827', marginTop: 2 }}>{value}</div>
-                  </div>
-                ))}
-              </div>
-              <div style={{ marginTop: 12 }}>
-                <TierBadge usdEquivalent={selected.usdEquivalent} />
-                <span style={{ marginLeft: 8 }}>
-                  <StatusChip status={selected.status} />
-                </span>
-              </div>
-            </div>
-
-            {/* CAC Observation */}
-            {selected.cacObservation && (
-              <div
-                style={{
-                  background: '#EFF6FF',
-                  border: '1px solid #BFDBFE',
-                  borderRadius: 10,
-                  padding: 14,
-                  marginBottom: 20,
-                }}
-              >
-                <div style={{ fontSize: 12, fontWeight: 700, color: '#1D4ED8', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 6 }}>
-                  CAC Observation
-                </div>
-                <div style={{ fontSize: 14, color: '#1E3A5F', lineHeight: 1.5 }}>{selected.cacObservation}</div>
-              </div>
-            )}
-
-            {/* Treasury Observation */}
-            <div style={{ marginBottom: 18 }}>
-              <label htmlFor="treasury-observation" style={labelStyle}>
-                Treasury Observation <span style={{ color: '#DC2626' }}>*</span>
-              </label>
-              <textarea
-                id="treasury-observation"
-                value={observation}
-                onChange={(e) => setObservation(e.target.value)}
-                rows={4}
-                placeholder="Enter your treasury observation / remarks…"
-                style={{ ...inputStyle, resize: 'vertical', lineHeight: 1.5 }}
-              />
-            </div>
-
-            {/* Rejection Reason */}
-            <div style={{ marginBottom: 18 }}>
-              <label htmlFor="rejection-reason" style={labelStyle}>
-                Rejection Reason <span style={{ color: '#9CA3AF' }}>(required if rejecting)</span>
-              </label>
-              <textarea
-                id="rejection-reason"
-                value={rejectionReason}
-                onChange={(e) => setRejectionReason(e.target.value)}
-                rows={2}
-                placeholder="State reason for rejection…"
-                style={{ ...inputStyle, resize: 'vertical', lineHeight: 1.5 }}
-              />
-            </div>
-
-            {/* Query Target Role */}
-            <div style={{ marginBottom: 24 }}>
-              <label htmlFor="query-target-role" style={labelStyle}>
-                Query Target Role <span style={{ color: '#9CA3AF' }}>(if raising query)</span>
-              </label>
-              <select
-                id="query-target-role"
-                value={queryTargetRole}
-                onChange={(e) => setQueryTargetRole(e.target.value)}
-                style={{ ...inputStyle, cursor: 'pointer' }}
-              >
-                <option value="CAC">CAC</option>
-                <option value="Agent">Agent</option>
-                <option value="GFSU">GFSU</option>
-              </select>
-            </div>
-
-            {/* Error */}
-            {modalError && (
-              <div
-                style={{
-                  background: '#FEE2E2',
-                  border: '1px solid #FECACA',
-                  borderRadius: 8,
-                  padding: '10px 14px',
-                  marginBottom: 18,
-                  color: '#991B1B',
-                  fontSize: 13,
-                }}
-              >
-                {modalError}
-              </div>
-            )}
-
-            {/* Action Buttons */}
-            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
-              <button
-                onClick={closeModal}
-                disabled={submitting}
-                style={{
-                  padding: '10px 20px',
-                  background: '#fff',
-                  border: '1px solid #D1D5DB',
-                  borderRadius: 9,
-                  cursor: 'pointer',
-                  fontSize: 14,
-                  fontWeight: 500,
-                  color: '#374151',
-                }}
-              >
-                Cancel
-              </button>
-
-              <button
-                id="modal-raise-query-btn"
-                onClick={() => handleAction('query')}
-                disabled={submitting}
-                style={{
-                  padding: '10px 20px',
-                  background: '#FFFBEB',
-                  border: '1px solid #F59E0B',
-                  borderRadius: 9,
-                  cursor: submitting ? 'not-allowed' : 'pointer',
-                  fontSize: 14,
-                  fontWeight: 600,
-                  color: '#92400E',
-                  opacity: submitting ? 0.7 : 1,
-                }}
-              >
-                ⚠ Raise Query
-              </button>
-
-              <button
-                id="modal-reject-btn"
-                onClick={() => handleAction('reject')}
-                disabled={submitting}
-                style={{
-                  padding: '10px 20px',
-                  background: '#FEF2F2',
-                  border: '1px solid #FCA5A5',
-                  borderRadius: 9,
-                  cursor: submitting ? 'not-allowed' : 'pointer',
-                  fontSize: 14,
-                  fontWeight: 600,
-                  color: '#991B1B',
-                  opacity: submitting ? 0.7 : 1,
-                }}
-              >
-                ✕ Reject
-              </button>
-
-              <button
-                id="modal-authorize-btn"
-                onClick={() => handleAction('approve')}
-                disabled={submitting}
-                style={{
-                  padding: '10px 22px',
-                  background: submitting ? '#6EE7B7' : '#059669',
-                  border: 'none',
-                  borderRadius: 9,
-                  cursor: submitting ? 'not-allowed' : 'pointer',
-                  fontSize: 14,
-                  fontWeight: 700,
-                  color: '#fff',
-                  opacity: submitting ? 0.8 : 1,
-                  transition: 'background 0.15s',
-                }}
-                onMouseEnter={(e) => {
-                  if (!submitting) (e.currentTarget as HTMLButtonElement).style.background = '#047857';
-                }}
-                onMouseLeave={(e) => {
-                  if (!submitting) (e.currentTarget as HTMLButtonElement).style.background = '#059669';
-                }}
-              >
-                {submitting ? 'Processing…' : '✓ Authorize'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ══════════════════ Timeline Modal ══════════════════ */}
-      {timelineOpen && timelineRequestId && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'rgba(0,0,0,0.45)',
-            zIndex: 1000,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            padding: 24,
-          }}
-          onClick={(e) => { if (e.target === e.currentTarget) { setTimelineOpen(false); setTimelineRequestId(null); } }}
-        >
-          <div
-            style={{
-              background: '#fff',
-              borderRadius: 16,
-              padding: 32,
-              width: '100%',
-              maxWidth: 560,
-              maxHeight: '88vh',
-              overflowY: 'auto',
-              boxShadow: '0 20px 60px rgba(0,0,0,0.18)',
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
-              <div style={{ fontSize: 17, fontWeight: 700, color: '#111827' }}>Request Timeline</div>
-              <button
-                onClick={() => { setTimelineOpen(false); setTimelineRequestId(null); }}
-                style={{
-                  width: 32,
-                  height: 32,
-                  border: 'none',
-                  background: '#F3F4F6',
-                  borderRadius: 8,
-                  cursor: 'pointer',
-                  fontSize: 18,
-                  color: '#6B7280',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                }}
-              >
-                ×
-              </button>
-            </div>
-            <RequestTimeline requestId={timelineRequestId} />
-          </div>
-        </div>
-      )}
+      {viewId && <RequestTimeline requestId={viewId} onClose={() => setViewId(null)} />}
+      {reviewPr && <TreasuryReviewModal pr={reviewPr} onClose={() => setReviewPr(null)} onSuccess={() => { setReviewPr(null); load(); }} />}
     </div>
   );
-};
+}
 
-export default TreasuryDashboard;
+function TreasuryReviewModal({ pr, onClose, onSuccess }: any) {
+  const [form, setForm] = useState({ action: 'approve', observation: '', rejectionReason: '', queryTargetRole: 'AGENT' });
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!form.observation) { setError('Treasury observation is required'); return; }
+    if (form.action === 'reject' && !form.rejectionReason) { setError('Rejection reason is required'); return; }
+    setSubmitting(true); setError('');
+    try {
+      await api.post(`/payment-requests/${pr.id}/treasury-review`, form);
+      onSuccess();
+    } catch (err: any) { setError(err.response?.data?.message || 'Action failed'); }
+    finally { setSubmitting(false); }
+  }
+
+  const isT2 = parseFloat(pr.usdEquivalent) > 50000;
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 1000, display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: '40px 20px', overflowY: 'auto' }}>
+      <div style={{ background: 'white', borderRadius: 12, width: '100%', maxWidth: 540, boxShadow: '0 20px 60px rgba(0,0,0,0.2)' }} onClick={e => e.stopPropagation()}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '18px 24px', borderBottom: '1px solid #E5E7EB' }}>
+          <div>
+            <h3 style={{ fontSize: 16, fontWeight: 700, color: '#111827' }}>Treasury Authorization</h3>
+            <p style={{ fontSize: 12, color: '#6B7280' }}>{pr.requestId} · <TierBadge amount={parseFloat(pr.usdEquivalent)} /></p>
+          </div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#6B7280' }}><X size={18} /></button>
+        </div>
+        <div style={{ padding: '20px 24px' }}>
+          {isT2 && (
+            <div style={{ background: '#FEF3C7', border: '1px solid #FDE68A', borderRadius: 8, padding: '10px 14px', marginBottom: 16 }}>
+              <p style={{ fontSize: 12, color: '#B45309', fontWeight: 600 }}>⚠ Tier 2 transaction — high-value payment above USD 50,000. Requires senior Treasury sign-off.</p>
+            </div>
+          )}
+          <div style={{ background: '#F9FAFB', borderRadius: 8, padding: '12px 14px', marginBottom: 16, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, fontSize: 12 }}>
+            <div><span style={{ color: '#6B7280' }}>Agent:</span> <strong>{pr.agentCode}</strong></div>
+            <div><span style={{ color: '#6B7280' }}>Beneficiary:</span> <strong>{pr.beneficiaryName}</strong></div>
+            <div><span style={{ color: '#6B7280' }}>Amount:</span> <strong>{pr.currency} {parseFloat(pr.originalAmount).toLocaleString('en-US', { minimumFractionDigits: 2 })}</strong></div>
+            <div><span style={{ color: '#6B7280' }}>USD Equiv:</span> <strong>$ {parseFloat(pr.usdEquivalent).toLocaleString('en-US', { minimumFractionDigits: 2 })}</strong></div>
+            {pr.swiftCode && <div><span style={{ color: '#6B7280' }}>SWIFT:</span> <strong>{pr.swiftCode}</strong></div>}
+            {pr.bankAccountNumber && <div><span style={{ color: '#6B7280' }}>Account:</span> <strong>{pr.bankAccountNumber}</strong></div>}
+          </div>
+          {pr.cacObservation && (
+            <div style={{ background: '#EDE9FE', border: '1px solid #DDD6FE', borderRadius: 8, padding: '10px 14px', marginBottom: 16 }}>
+              <p style={{ fontSize: 11, fontWeight: 700, color: '#5B21B6', marginBottom: 4 }}>CAC OBSERVATION</p>
+              <p style={{ fontSize: 13, color: '#4C1D95' }}>{pr.cacObservation}</p>
+            </div>
+          )}
+          <form onSubmit={handleSubmit}>
+            <div style={{ marginBottom: 14 }}>
+              <label style={labelStyle}>Treasury Action</label>
+              <div style={{ display: 'flex', gap: 8 }}>
+                {[['approve', 'Authorize ✓', '#16A34A'], ['query', 'Raise Query ?', '#D97706'], ['reject', 'Reject ✗', '#DC2626']].map(([val, lbl, col]) => (
+                  <button key={val} type="button" onClick={() => setForm(p => ({ ...p, action: val as string }))}
+                    style={{ flex: 1, padding: '8px', border: `2px solid ${form.action === val ? col : '#D1D5DB'}`, borderRadius: 8, background: form.action === val ? col : 'white', color: form.action === val ? 'white' : '#374151', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
+                    {lbl}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div style={{ marginBottom: 14 }}>
+              <label style={labelStyle}>Treasury Observation *</label>
+              <textarea style={{ ...inputStyle, height: 80, resize: 'vertical' }} value={form.observation} onChange={e => setForm(p => ({ ...p, observation: e.target.value }))} placeholder="Authorization notes, compliance remarks..." />
+            </div>
+            {form.action === 'reject' && (
+              <div style={{ marginBottom: 14 }}>
+                <label style={labelStyle}>Rejection Reason *</label>
+                <textarea style={{ ...inputStyle, height: 64, resize: 'vertical' }} value={form.rejectionReason} onChange={e => setForm(p => ({ ...p, rejectionReason: e.target.value }))} />
+              </div>
+            )}
+            {error && <div style={{ marginBottom: 12, padding: '10px 14px', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 8, fontSize: 12, color: '#DC2626' }}>{error}</div>}
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+              <button type="button" onClick={onClose} style={{ padding: '9px 18px', border: '1px solid #D1D5DB', borderRadius: 8, background: 'white', cursor: 'pointer', fontSize: 13 }}>Cancel</button>
+              <button type="submit" disabled={submitting} style={{ padding: '9px 20px', background: form.action === 'approve' ? '#16A34A' : form.action === 'reject' ? '#DC2626' : '#D97706', color: 'white', border: 'none', borderRadius: 8, cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>
+                {submitting ? 'Submitting...' : form.action === 'approve' ? 'Authorize Payment' : form.action === 'reject' ? 'Reject' : 'Raise Query'}
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  );
+}

@@ -9,6 +9,17 @@ import { SystemConfig } from '../entities/system-config.entity';
 
 @Injectable()
 export class PaymentRequestsService {
+  // Helper to fetch exchange rate from SystemConfig (e.g., RATE_INR = 0.012)
+  private async getRate(currency: string): Promise<number> {
+    const key = `RATE_${currency.toUpperCase()}`;
+    const cfg = await this.configRepo.findOne({ where: { configKey: key } });
+    if (cfg && cfg.configValue) {
+      const num = parseFloat(cfg.configValue);
+      return isNaN(num) ? 1 : num;
+    }
+    // fallback to 1 (no conversion)
+    return 1;
+  }
   constructor(
     @InjectRepository(PaymentRequest) private prRepo: Repository<PaymentRequest>,
     @InjectRepository(AgentMaster) private agentRepo: Repository<AgentMaster>,
@@ -62,7 +73,8 @@ export class PaymentRequestsService {
     const agent = await this.agentRepo.findOne({ where: { agentCode: user.assignedOfficeCode } });
     if (!agent) throw new NotFoundException('Agent office not found');
     const requestId = await this.generateRequestId(user.assignedOfficeCode);
-    const usdEquivalent = parseFloat(data.originalAmount) * parseFloat(data.roe || 1);
+    const rate = data.roe ? parseFloat(data.roe) : await this.getRate(data.currency);
+    const usdEquivalent = parseFloat(data.originalAmount) * rate;
     const pr = this.prRepo.create({
       requestId,
       requestType: data.requestType,
